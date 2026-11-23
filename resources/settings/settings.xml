@@ -1,0 +1,9 @@
+<settings>
+    <setting propertyKey="@Properties.Theme" title="@Strings.ThemeTitle">
+        <settingConfig type="list">
+            <listEntry value="0">@Strings.ThemeRed</listEntry>
+            <listEntry value="1">@Strings.ThemeAmber</listEntry>
+            <listEntry value="2">@Strings.ThemeCyan</listEntry>
+        </settingConfig>
+    </setting>
+</settings>

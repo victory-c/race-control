@@ -2,3 +2,5 @@ bin/
 *.der
 *.pem
 .DS_Store
+design/
+docs/screens/v2/

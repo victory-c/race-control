@@ -1,0 +1,6 @@
+<fonts>
+    <font id="Clock" filename="clock.fnt" antialias="true"/>
+    <font id="Thin" filename="thin.fnt" antialias="true"/>
+    <font id="Val" filename="val.fnt" antialias="true"/>
+    <font id="Lab" filename="lab.fnt" antialias="true"/>
+</fonts>

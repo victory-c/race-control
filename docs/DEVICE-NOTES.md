@@ -1,3 +1,5 @@
+> Note: this file was written for earlier designs. The current face shows a plain heart-rate number, Body Battery, steps, battery, weather with sunset, and a configurable second time zone. It has no heart-rate trace, recovery time or threshold settings, uses four bitmap fonts (clock 172 px, thin 172 px, values 44 px, labels 30 px on the 47 mm), and its always-on frame is about 6% luminance worst case. Sections below that mention the removed features are out of date.
+
 # Device and API notes
 
 Target: Garmin Forerunner 570, both sizes.
@@ -32,15 +34,15 @@ the simulator. Items marked **sim only** have not been confirmed on a real watch
 - Burn-in protection on this class of device is a **luminance budget: the
   always-on frame must stay under 10% of full-screen luminance**. If it does
   not, the system blanks the screen until the next wake; there is no callback.
-- The always-on frame here is a thin grey `HH MM`, outline colon marks, the date
-  and one 1 px rule. The simulator's Screen Burn-In tool (File > View Screen
-  Heat Map, in Always-On display mode) reports **2.5-3.2% luminance, burn-in
-  state NO** during its 24-hour run on the 47 mm model. The 42 mm model was not
-  run through the tool; it draws the same frame scaled down.
-- The whole block shifts every minute on both axes (5 x 7 = 35 positions, at
-  most 6 px from home). Stroke cores of unchanged digits still overlap between
-  neighbouring positions, so this spreads wear rather than eliminating it,
-  which is all the luminance rule asks for.
+- The always-on frame is a thin grey `HH:MM` (Saira Light), two small colon
+  squares, one 1 px rule and the date. **Estimated at 2-3% luminance** from a
+  simulator capture and from replaying the frame against the font bitmaps.
+  It has not been re-run through the simulator's Screen Burn-In tool
+  (File > View Screen Heat Map) since the redesign; the previous design
+  measured 2.5-3.2% there.
+- The clock block shifts every minute on both axes (5 x 7 = 35 positions, at
+  most 6 px from home). The date is static all day, so it moves further
+  (up to 15 px vertically, 8 px horizontally, on a different period).
 - `System.getDisplayMode()` (API 5.0) is the source of truth for
   high-power / low-power / off; `onEnterSleep` / `onExitSleep` are kept as the
   fallback signal.
@@ -51,7 +53,9 @@ the simulator. Items marked **sim only** have not been confirmed on a real watch
 
 | Metric | Primary | Fallback | Shown when missing |
 |---|---|---|---|
-| Heart rate | `Activity.Info.currentHeartRate` (1 Hz, awake) | newest `ActivityMonitor.getHeartRateHistory` sample | `--`, no live marker |
+| Heart rate | `Activity.Info.currentHeartRate` (1 Hz, awake) | newest `ActivityMonitor.getHeartRateHistory` sample, only if under 5 minutes old | `--`, no margin caption |
+| Heart-rate trace | `ActivityMonitor.getHeartRateHistory` (4 h 16 min, 64 slots of 4 min, highest sample per slot) | none | dim stubs |
+| Wind | `Weather.CurrentConditions.windSpeed` (m/s) and `.windBearing` | none | omitted |
 | Body Battery | `COMPLICATION_TYPE_BODY_BATTERY` (push) | `SensorHistory.getBodyBatteryHistory` newest sample | `--` |
 | Recovery time | `COMPLICATION_TYPE_RECOVERY_TIME` (**minutes**) | `ActivityMonitor.Info.timeToRecovery` (**hours**) | `--` |
 | Battery | `System.getSystemStats().battery`, `.charging` | none needed | always present |
@@ -77,10 +81,16 @@ the simulator. Items marked **sim only** have not been confirmed on a real watch
   change a few times an hour, so those two are push-driven.
 - **Whether `currentHeartRate` is populated on a watch face outside an
   activity is not stated in the SDK docs** (sim only: it is). If it is null on
-  hardware the cell falls back to the newest history sample, refreshed once a
-  minute.
+  hardware the row falls back to the newest history sample, refreshed once a
+  minute, and shows `--` when that sample is more than 5 minutes old (watch
+  off the wrist) rather than presenting an old reading as current.
 - **Steps complication is unavailable in wheelchair mode**, which is one reason
   steps use `ActivityMonitor` directly.
+- **Recovery time is still a subscribed complication**, and its value is in
+  minutes, so it can push about once a minute while it counts down, including
+  while the face is asleep. Each push is a few field writes. Reading it
+  unsubscribed was not adopted because the docs do not say an unsubscribed
+  complication returns a fresh value; worth testing on hardware.
 - Complication subscriptions are dropped when the app stops and are re-made in
   `Telemetry.initialize()`. The subscription limit is undocumented; a failed
   subscribe is caught and the fallback is used.
@@ -93,15 +103,23 @@ communications, no background service.
 
 ## Fonts
 
-- Only four Latin vector faces exist on the FR570: `RobotoCondensedBold`,
-  `RobotoCondensedRegular`, `RobotoRegular`, `RobotoItalic`. There is no
-  non-condensed bold, so the Swiss feel comes from condensed bold numerals,
-  caps labels and the grid.
-- `RobotoCondensedBold` digits are tabular, so the clock does not jitter as
-  digits change and its width is measured once.
-- There is no letter-spacing API; caps labels are untracked.
-- CJK / Thai firmware swaps system fonts. The face only uses system fonts as a
-  fallback if `getVectorFont` returns null.
+- The watch only ships four Latin vector faces (Roboto / Roboto Condensed),
+  so the face uses its own **bitmap fonts**, rasterised from OFL typefaces in
+  `fonts-src/` by `tools/fonts.sh`: Saira Semi Condensed SemiBold (clock,
+  heart rate, seconds, values), Saira Light (always-on clock) and Martian Mono
+  (labels).
+- Bitmap fonts do not scale, so each screen size has its own set:
+  `resources-round-454x454/fonts` (104 / 68 / 50 / 34 / 20 px) and
+  `resources-round-390x390/fonts` (89 / 58 / 43 / 29 / 17 px).
+- Glyph sets are minimal. **A character missing from a set draws nothing**, so
+  any new label or unit must be added to the character list in
+  `tools/fonts.sh` and the fonts regenerated.
+- Decoded sheets total about 155 kB (47 mm) / 114 kB (42 mm). On this device
+  font resources live in the 3 MB graphics pool, not the 131 kB app heap; the
+  simulator's memory readout stays around 22 kB with all six loaded.
+- Clock digits are drawn one per fixed-width cell, so the time does not shift
+  as digits change.
+- There is no letter-spacing API and no text rotation.
 
 ## Clock and date
 
@@ -117,6 +135,9 @@ communications, no background service.
 - Theme is a `number` property (`Theme`: 0 red, 1 amber, 2 cyan), editable from
   Garmin Connect / Connect IQ and on the watch through `getSettingsView()`
   (Menu2).
+- **Sideloaded builds cannot be configured from the phone app**; the defaults
+  in `resources/settings/properties.xml` apply until the face is installed
+  from the store.
 - The docs tie `onSettingsChanged()` to phone-side edits only, so the view also
   re-reads the theme in `onShow()` after the on-device menu closes.
 
@@ -126,10 +147,11 @@ communications, no background service.
   Settings > Display Mode > Always-On.
 - Simulated complication and sensor values are synthetic. Null / unsupported
   paths are covered by the unit tests (`./build.sh test`), not by hardware.
-- The simulator's step count could not be driven from scripts, so the step
-  gauge's partial and goal-reached states are covered by unit tests of the
-  segment maths only.
-- The simulator keeps the last stored `Theme` property between loads; use
-  File > Reset All App Data to get back to the default.
+- The simulator's step count and heart rate could not be driven from scripts.
+  Long step counts are covered by unit tests of the formatting; the
+  over-ceiling state was captured with a temporarily lowered ceiling.
+- The simulator keeps stored properties between loads, and File > Reset All
+  App Data did not reliably clear them; deleting
+  `$TMPDIR/com.garmin.connectiq/GARMIN/APPS/SETTINGS/RACECONTROL-*.SET` does.
 - Switching the simulated device while the Screen Burn-In window is open hangs
   the load; close that window first.

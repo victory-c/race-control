@@ -42,6 +42,57 @@ module Themes {
     }
 }
 
+// Second time zone shown under the clock. Set from Garmin Connect / the
+// Connect IQ app: on/off, a short label, and a fixed offset from UTC in
+// minutes (daylight saving is not applied).
+module Zone2 {
+    const DEFAULT_LABEL = "HKG";
+    const DEFAULT_OFFSET_MIN = 480;
+
+    // Upper-case, at most four characters; anything unusable gives the default.
+    function cleanLabel(v as Object?) as String {
+        if (v instanceof String) {
+            var s = v.toUpper();
+            if (s.length() > 4) {
+                s = s.substring(0, 4) as String;
+            }
+            if (s.length() > 0) {
+                return s;
+            }
+        }
+        return DEFAULT_LABEL;
+    }
+
+    // UTC-12:00 .. UTC+14:00, in minutes.
+    function cleanOffset(v as Object?) as Number {
+        if (v instanceof Number && v >= -720 && v <= 840) {
+            return v;
+        }
+        return DEFAULT_OFFSET_MIN;
+    }
+
+    function read(key as String) as Object? {
+        try {
+            return Application.Properties.getValue(key);
+        } catch (e) {
+            return null;    // property missing: caller falls back to the default
+        }
+    }
+
+    function shown() as Boolean {
+        var v = read("Zone2Show");
+        return !(v instanceof Boolean) || v;
+    }
+
+    function label() as String {
+        return cleanLabel(read("Zone2Label"));
+    }
+
+    function offsetSec() as Number {
+        return cleanOffset(read("Zone2Offset")) * 60;
+    }
+}
+
 class ThemeMenu extends WatchUi.Menu2 {
     function initialize() {
         Menu2.initialize({ :title => WatchUi.loadResource(Rez.Strings.ThemeTitle) as String });

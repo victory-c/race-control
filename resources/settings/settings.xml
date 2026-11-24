@@ -6,4 +6,13 @@
             <listEntry value="2">@Strings.ThemeCyan</listEntry>
         </settingConfig>
     </setting>
+    <setting propertyKey="@Properties.Zone2Show" title="@Strings.Zone2ShowTitle">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.Zone2Label" title="@Strings.Zone2LabelTitle">
+        <settingConfig type="alphaNumeric" maxLength="4"/>
+    </setting>
+    <setting propertyKey="@Properties.Zone2Offset" title="@Strings.Zone2OffsetTitle" prompt="@Strings.Zone2OffsetPrompt">
+        <settingConfig type="numeric" min="-720" max="840"/>
+    </setting>
 </settings>

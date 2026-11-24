@@ -1,3 +1,6 @@
 <properties>
     <property id="Theme" type="number">0</property>
+    <property id="Zone2Show" type="boolean">true</property>
+    <property id="Zone2Label" type="string">HKG</property>
+    <property id="Zone2Offset" type="number">480</property>
 </properties>

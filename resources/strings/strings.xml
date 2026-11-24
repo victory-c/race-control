@@ -4,4 +4,8 @@
     <string id="ThemeRed">Pit Red</string>
     <string id="ThemeAmber">Amber</string>
     <string id="ThemeCyan">Cyan</string>
+    <string id="Zone2ShowTitle">Show second time zone</string>
+    <string id="Zone2LabelTitle">Second zone label (up to 4 letters)</string>
+    <string id="Zone2OffsetTitle">Second zone offset from UTC, in minutes</string>
+    <string id="Zone2OffsetPrompt">Hong Kong 480, London 0, New York -300</string>
 </strings>

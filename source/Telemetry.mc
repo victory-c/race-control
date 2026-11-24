@@ -1,4 +1,5 @@
 import Toybox.Activity;
+import Toybox.Application;
 import Toybox.ActivityMonitor;
 import Toybox.Complications;
 import Toybox.Lang;
@@ -11,64 +12,67 @@ import Toybox.Weather;
 // device might not have. Every metric is nullable: null means "not available
 // right now, or not supported on this device" and the view renders it as "--".
 //
-// Strategy (cheapest source first):
-//   * Body Battery, recovery time: Complications push updates, so nothing is
-//     polled. Direct APIs are the fallback when a complication is missing or
-//     has no value. (Heart rate is deliberately NOT subscribed: it changes
-//     every few seconds and would wake the app all day while the face sleeps.)
-//   * Battery, steps, weather: plain cached reads, once a minute at most.
-//   * Live heart rate: one field read per awake second.
+//   * Body Battery: a Complication pushes updates (a few an hour), so nothing
+//     is polled; the on-device history is the fallback.
+//   * Battery, steps, weather, sunset: plain cached reads, once a minute at most.
+//   * Heart rate: Activity.Info once per awake second (a cached system value),
+//     newest history sample as the once-a-minute fallback.
 class Telemetry {
 
-    var hr as Number? = null;
     var bodyBattery as Number? = null;
-    var recoveryMin as Number? = null;      // minutes until fully recovered
     var battery as Number = 0;              // percent
     var charging as Boolean = false;
     var steps as Number? = null;
     var stepGoal as Number? = null;
     var temperature as Number? = null;      // already in the user's unit
     var condition as String? = null;
+    var windSpeed as Number? = null;        // already in the user's unit
+    var windUnit as String = "KMH";
+    var heartRate as Number? = null;
+    var sunset as Time.Moment? = null;      // today's sunset at the weather location
 
-    // Set when a complication pushed a new value; the view clears it after it
-    // has rebuilt its cached strings.
+    // Set when a complication pushed a new value; cleared by refreshPushed().
     var dirty as Boolean = false;
 
-    // Last values pushed by the complication system.
     private var mCompBody as Number? = null;
-    private var mCompRecovery as Number? = null;
-    private var mHistHr as Number? = null;
 
     // Capability flags, resolved once: `has` is a runtime symbol lookup.
     private var mHasComplications as Boolean;
     private var mHasBodyHistory as Boolean;
     private var mHasWeather as Boolean;
+    private var mHasSunset as Boolean;
     private var mHasHrHistory as Boolean;
+    // Last place a forecast was for, kept across restarts for the sunset.
+    private var mLat as Double? = null;
+    private var mLon as Double? = null;
 
     function initialize() {
         mHasComplications = (Toybox has :Complications);
         mHasBodyHistory = (Toybox has :SensorHistory) && (Toybox.SensorHistory has :getBodyBatteryHistory);
         mHasWeather = (Toybox has :Weather) && (Weather has :getCurrentConditions);
+        mHasSunset = mHasWeather && (Weather has :getSunset);
         mHasHrHistory = (ActivityMonitor has :getHeartRateHistory);
-        if (mHasComplications) {
-            subscribe();
+        try {
+            var saved = Application.Storage.getValue("loc");
+            if (saved instanceof Array && saved.size() == 2) {
+                var la = saved[0];
+                var lo = saved[1];
+                if (la instanceof Double && lo instanceof Double) {
+                    mLat = la;
+                    mLon = lo;
+                }
+            }
+        } catch (e) {
+            // No stored place: sunset stays hidden until a forecast has one.
         }
-    }
-
-    private function subscribe() as Void {
-        Complications.registerComplicationChangeCallback(method(:onComplication));
-        var types = [
-            Complications.COMPLICATION_TYPE_BODY_BATTERY,
-            Complications.COMPLICATION_TYPE_RECOVERY_TIME
-        ];
-        for (var i = 0; i < types.size(); i++) {
-            var id = new Complications.Id(types[i]);
+        if (mHasComplications) {
+            Complications.registerComplicationChangeCallback(method(:onComplication));
+            var id = new Complications.Id(Complications.COMPLICATION_TYPE_BODY_BATTERY);
             try {
                 Complications.subscribeToUpdates(id);
                 onComplication(id);     // prime the cache with the current value
             } catch (e) {
-                // Complication not offered by this device, or too many
-                // subscriptions: the direct-API fallback covers it.
+                // Not offered by this device: the history fallback covers it.
             }
         }
     }
@@ -84,6 +88,9 @@ class Telemetry {
     // Push callback. No requestUpdate(): awake we redraw every second anyway,
     // asleep (always-on) no telemetry is shown.
     function onComplication(id as Complications.Id) as Void {
+        if (id.getType() != Complications.COMPLICATION_TYPE_BODY_BATTERY) {
+            return;
+        }
         var n = null;
         try {
             var v = Complications.getComplication(id).value;
@@ -95,34 +102,12 @@ class Telemetry {
         } catch (e) {
             // Treat as "no value".
         }
-        var t = id.getType();
-        if (t == Complications.COMPLICATION_TYPE_BODY_BATTERY) {
-            mCompBody = n;
-            dirty = true;
-        } else if (t == Complications.COMPLICATION_TYPE_RECOVERY_TIME) {
-            mCompRecovery = n;
-            dirty = true;
-        }
-    }
-
-    // Cheap; called every awake second. Returns true when the value changed.
-    function refreshHeartRate() as Boolean {
-        var v = null;
-        var info = Activity.getActivityInfo();
-        if (info != null) {
-            v = info.currentHeartRate;
-        }
-        if (v == null) {
-            v = mHistHr;
-        }
-        var changed = (v != hr);
-        hr = v;
-        return changed;
+        mCompBody = n;
+        dirty = true;
     }
 
     // Slow path: once per minute while awake, and on wake.
     function refreshSlow() as Void {
-        dirty = false;
         var stats = System.getSystemStats();
         battery = (stats.battery + 0.5).toNumber();
         charging = (stats has :charging) && stats.charging;
@@ -130,18 +115,50 @@ class Telemetry {
         var am = ActivityMonitor.getInfo();
         steps = am.steps;
         stepGoal = am.stepGoal;
+        refreshPushed();
+        refreshWeather();
+        refreshHeartSlow();
+    }
 
-        // Recovery: complication (minutes) first, ActivityMonitor (hours) second.
-        var rec = mCompRecovery;
-        if (rec == null && (am has :timeToRecovery)) {
-            var h = am.timeToRecovery;
-            if (h != null) {
-                rec = h * 60;
+    // Once per awake second. Returns true when the value changed. A missing
+    // live value keeps the last one until the next slow refresh decides.
+    function refreshHeart() as Boolean {
+        var info = Activity.getActivityInfo();
+        if (info != null) {
+            var hr = info.currentHeartRate;
+            if (hr != null && hr != heartRate) {
+                heartRate = hr;
+                return true;
             }
         }
-        recoveryMin = rec;
+        return false;
+    }
 
-        // Body Battery: complication first, newest on-device history sample second.
+    // Live value, else the newest history sample if it is under five minutes
+    // old (watch off the wrist shows "--", not an old reading).
+    private function refreshHeartSlow() as Void {
+        var hr = null;
+        var info = Activity.getActivityInfo();
+        if (info != null) {
+            hr = info.currentHeartRate;
+        }
+        if (hr == null && mHasHrHistory) {
+            var s = ActivityMonitor.getHeartRateHistory(1, true).next();
+            if (s != null) {
+                var v = s.heartRate;
+                var at = s.when;
+                if (v != null && v != ActivityMonitor.INVALID_HR_SAMPLE && at != null
+                        && Time.now().value() - at.value() < 300) {
+                    hr = v;
+                }
+            }
+        }
+        heartRate = hr;
+    }
+
+    // Body Battery: complication first, newest on-device history sample second.
+    function refreshPushed() as Void {
+        dirty = false;
         var bb = mCompBody;
         if (bb == null && mHasBodyHistory) {
             var it = Toybox.SensorHistory.getBodyBatteryHistory({ :period => 1, :order => Toybox.SensorHistory.ORDER_NEWEST_FIRST });
@@ -154,40 +171,74 @@ class Telemetry {
             }
         }
         bodyBattery = bb;
+    }
 
-        // Heart-rate history only matters when nothing live is available.
-        mHistHr = null;
-        if (mHasHrHistory) {
-            var hs = ActivityMonitor.getHeartRateHistory(1, true).next();
-            if (hs != null) {
-                var hv = hs.heartRate;
-                if (hv != null && hv != ActivityMonitor.INVALID_HR_SAMPLE) {
-                    mHistHr = hv;
-                }
-            }
-        }
-
-        // Weather: a cached system object, so reading it is cheap. Observations
-        // older than six hours (phone out of range) are treated as missing
-        // rather than shown as current.
+    // Weather: a cached system object, so reading it is cheap. Observations
+    // older than six hours (phone out of range) are treated as missing rather
+    // than shown as current.
+    private function refreshWeather() as Void {
         temperature = null;
         condition = null;
-        if (mHasWeather) {
-            var c = Weather.getCurrentConditions();
-            if (c != null) {
-                var at = c.observationTime;
-                if (at == null || Time.now().value() - at.value() < 6 * 3600) {
-                    var t = c.temperature;
-                    if (t != null) {
-                        if (System.getDeviceSettings().temperatureUnits == System.UNIT_STATUTE) {
-                            t = t * 9.0 / 5.0 + 32.0;
-                        }
-                        temperature = Math.round(t).toNumber();
-                    }
-                    condition = WeatherText.label(c.condition);
+        windSpeed = null;
+        if (!mHasWeather) {
+            return;
+        }
+        var c = Weather.getCurrentConditions();
+        refreshSunset((c != null) ? c.observationLocationPosition : null);
+        if (c == null) {
+            return;
+        }
+        var at = c.observationTime;
+        if (at != null && Time.now().value() - at.value() >= 6 * 3600) {
+            return;
+        }
+        var settings = System.getDeviceSettings();
+        var t = c.temperature;
+        if (t != null) {
+            if (settings.temperatureUnits == System.UNIT_STATUTE) {
+                t = t * 9.0 / 5.0 + 32.0;
+            }
+            temperature = Math.round(t).toNumber();
+        }
+        condition = WeatherText.label(c.condition);
+        var ws = c.windSpeed;       // metres per second
+        if (ws != null) {
+            var statute = (settings.distanceUnits == System.UNIT_STATUTE);
+            windSpeed = Math.round(ws * (statute ? 2.23694 : 3.6)).toNumber();
+            windUnit = statute ? "MPH" : "KMH";
+        }
+    }
+
+    // Sunset only needs a place, so it survives a stale or missing forecast:
+    // the forecast's own location when it has one, else the last one seen.
+    private function refreshSunset(loc as Toybox.Position.Location?) as Void {
+        if (!mHasSunset) {
+            return;
+        }
+        if (loc != null) {
+            var d = loc.toDegrees();
+            var la = d[0];
+            var lo = d[1];
+            var oldLa = mLat;
+            var oldLo = mLon;
+            // Rewrite storage only after a real move (about 5 km), not on jitter.
+            if (oldLa == null || oldLo == null || (la - oldLa).abs() > 0.05 || (lo - oldLo).abs() > 0.05) {
+                mLat = la;
+                mLon = lo;
+                try {
+                    Application.Storage.setValue("loc", [la, lo]);
+                } catch (e) {
+                    // Storage full or unavailable: keep it in memory only.
                 }
             }
+        } else {
+            var la = mLat;
+            var lo = mLon;
+            if (la != null && lo != null) {
+                loc = new Toybox.Position.Location({ :latitude => la, :longitude => lo, :format => :degrees });
+            }
         }
+        sunset = (loc != null) ? Weather.getSunset(loc, Time.now()) : null;
     }
 }
 
